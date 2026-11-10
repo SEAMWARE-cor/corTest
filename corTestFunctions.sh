@@ -217,7 +217,14 @@ function corCurl()
   curlArgs=(-s -S)
 
   # Method
-  if [ "$_method" != "" ]; then
+  #
+  # A HEAD is curl's --head, not -X HEAD: -X only renames the method, and curl then waits for the body
+  # the Content-Length announces - it never comes, curl fails (exit 18). A 204 has no Content-Length, so
+  # -X HEAD went unnoticed until a HEAD answered 201 (an NGSI-LD EntityMap made by a HEAD).
+  #
+  if [ "$_method" == "HEAD" ]; then
+    curlArgs+=(--head)
+  elif [ "$_method" != "" ]; then
     curlArgs+=(-X "$_method")
   fi
 
@@ -354,6 +361,7 @@ function corCurl()
   [ -n "$COR_TRANSPORT_TRACE" ] && echo "http ${_method:-GET} $_url" >> "$COR_TRANSPORT_TRACE"
   curl "${curlArgs[@]}" "$fullUrl" > $_tmp.body 2>/dev/null
   local _curlRc=$?
+  [ "$_method" == "HEAD" ] && : > $_tmp.body          # --head writes the header block to stdout too - -D has it
 
   #
   # Say so, loudly and in the test's own output. curl's stderr is discarded
