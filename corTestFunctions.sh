@@ -85,7 +85,6 @@ function corAwaitPort()
 {
   local port=$1
   local maxWait=${2:-5}
-  local deadline=$(( $(date +%s) + maxWait ))
 
   #
   # bash's own /dev/tcp, not `nc`. Two reasons, both learned the hard way:
@@ -96,20 +95,30 @@ function corAwaitPort()
   #     and answering. That cost a full CI run to diagnose.
   #   - /dev/tcp is a bash builtin: nothing to install, nothing to detect.
   #
-  # The loop also counts REAL seconds now. It used to count iterations while
-  # sleeping 0.2s between them, so `corAwaitPort <port> 10` waited two seconds
-  # and called it ten - fine on an idle workstation, not on a loaded runner.
+  # The deadline is in REAL time: `corAwaitPort <port> 10` waits ten seconds on a loaded runner too.
   #
-  # 20 ms between attempts: a broker is up in some 50 ms, and 0.2 s steps made
-  # every start cost 0.2 s - in every test, for every broker it starts.
+  # ⭐ NO PROCESS PER ATTEMPT. A broker answers some 5 ms after exec; each attempt used to fork three
+  # times - `date`, the ( ) around the connect, `sleep 0.02` - and the next attempt came ~20 ms after the
+  # one that failed, so every broker start cost ~20 ms of waiting, in every test. Now all of it is bash:
+  # the clock is $EPOCHREALTIME, the connect is an exec in this shell (its fd closed at once), and the
+  # pause is a 2 ms `read -t` on a pipe nothing writes to (opened once, read-write: never EOF).
   #
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+  local deadline=$(( ${EPOCHREALTIME//[!0-9]/} + maxWait * 1000000 ))
+  local fd
+  local pauseFd
+
+  exec {pauseFd}<> <(:)
+
+  while (( ${EPOCHREALTIME//[!0-9]/} < deadline )); do
+    if { exec {fd}<>/dev/tcp/127.0.0.1/"$port"; } 2>/dev/null; then
+      exec {fd}>&-
+      exec {pauseFd}>&-
       return 0
     fi
-    sleep 0.02
+    read -t 0.002 -u $pauseFd
   done
 
+  exec {pauseFd}>&-
   echo "corAwaitPort: port $port not ready after ${maxWait}s" >&2
   return 1
 }
